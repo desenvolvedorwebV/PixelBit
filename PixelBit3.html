@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>PixelBit</title>
+
+<style>
+body {
+  background:#111;
+  color:#eee;
+  font-family:sans-serif;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+}
+
+#grid {
+  display:grid;
+  grid-template-columns:repeat(8,48px);
+  gap:6px;
+  margin:20px 0;
+}
+
+.pixel {
+  width:50px;
+  height:50px;
+  border-radius:6px;
+  background:#222;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  user-select:none;
+  transition:.1s;
+}
+
+.pixel.active {
+  box-shadow:0 0 12px #fff;
+  transform:scale(1.1);
+}
+
+.pixel.dragging { opacity:0.4; }
+.pixel.gap { opacity:0.15; }
+
+#controls {
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+}
+
+button {
+  padding:10px 16px;
+  background:#333;
+  color:#eee;
+  border:none;
+  border-radius:4px;
+  cursor:pointer;
+}
+
+textarea {
+  width:90%;
+  height:120px;
+  background:#000;
+  color:#0f0;
+}
+</style>
+</head>
+
+<body>
+
+<h1>PixelBit</h1>
+<div id="grid"></div>
+
+<div id="controls">
+  <button id="play">▶ Play</button>
+  <button id="stop">⏹ Stop</button>
+  <button id="export">💾 Export JSON</button>
+  <button id="import">📂 Import JSON</button>
+  <button id="exportWav">🎧 Export WAV</button>
+  <button id="exportMidi">🎼 Export MIDI</button>
+</div>
+
+<textarea id="json"></textarea>
+
+<script>
+// ===== ÁUDIO =====
+const ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+const STEPS = 8;
+const CHANNELS = 8;
+const BPM = 120;
+const STEP_TIME = 60 / BPM;
+
+const waveforms = [
+  "square","triangle","sawtooth","square",
+  "triangle","sine","square","sawtooth"
+];
+
+const scale = [
+  261.63,293.66,329.63,349.23,
+  392.00,440.00,493.88,523.25
+];
+
+// ===== ESTADO =====
+const grid = document.getElementById("grid");
+let pixels = [];
+let timeline = [];
+let playing = false;
+let playIndex = 0;
+let timer = null;
+
+// ===== UTIL =====
+function getNextFreeId() {
+  const used = timeline
+    .filter(t => t?.type === "note")
+    .map(t => t.id);
+
+  let id = 1;
+  while (used.includes(id)) id++;
+  return id;
+}
+
+// ===== GRID =====
+for (let y = 0; y < CHANNELS; y++) {
+  for (let x = 0; x < STEPS; x++) {
+
+    const p = document.createElement("div");
+    p.className = "pixel";
+    p.style.background = `hsl(${x*40},70%,50%)`;
+    p.draggable = true;
+
+    p.onclick = () => handleClick(x, y);
+
+    p.ondragstart = e => {
+      const from = timeline.findIndex(
+        t => t?.type === "note" && t.x === x && t.y === y
+      );
+      if (from === -1) return e.preventDefault();
+      e.dataTransfer.setData("from", from);
+      p.classList.add("dragging");
+    };
+
+    p.ondragend = () => p.classList.remove("dragging");
+    p.ondragover = e => e.preventDefault();
+
+    p.ondrop = e => {
+      e.preventDefault();
+
+      const from = Number(e.dataTransfer.getData("from"));
+      const note = timeline[from];
+      if (!note || note.type !== "note") return;
+
+      const to = timeline.findIndex(
+        t => t?.type === "note" && t.x === x && t.y === y
+      );
+
+      // troca nota com nota
+      if (to !== -1) {
+        [timeline[from], timeline[to]] = [timeline[to], timeline[from]];
+        refreshGrid();
+        return;
+      }
+
+      // move nota para gap
+      const gap = timeline.findIndex(t => t?.type === "gap");
+      if (gap !== -1) {
+        timeline[gap] = note;
+        timeline[from] = { type:"gap" };
+        refreshGrid();
+      }
+    };
+
+    grid.appendChild(p);
+    pixels.push(p);
+  }
+}
+
+// ===== CLIQUE =====
+function handleClick(x, y) {
+  const index = timeline.findIndex(
+    t => t?.type === "note" && t.x === x && t.y === y
+  );
+
+  // REMOVER → GAP
+  if (index !== -1) {
+    timeline[index] = { type:"gap" };
+    refreshGrid();
+    return;
+  }
+
+  // ADICIONAR → PRIMEIRO GAP LIVRE
+  const slot = timeline.findIndex(t => t?.type === "gap");
+
+  const note = {
+    type:"note",
+    id: getNextFreeId(),
+    x,
+    y,
+    freq: scale[x],
+    velocity: 1
+  };
+
+  if (slot !== -1) timeline[slot] = note;
+  else timeline.push(note);
+
+  playNote(y, scale[x]);
+  refreshGrid();
+}
+
+// ===== VISUAL =====
+function refreshGrid() {
+  pixels.forEach(p => {
+    p.textContent = "";
+    p.classList.remove("active","gap");
+    p.style.opacity = 0.3;
+  });
+
+  timeline.forEach(t => {
+    if (!t || t.type !== "note") return;
+    const idx = t.y * STEPS + t.x;
+    pixels[idx].textContent = t.id;
+    pixels[idx].style.opacity = 1;
+  });
+}
+
+// ===== ÁUDIO =====
+function playNote(channel, freq) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.type = waveforms[channel];
+  osc.frequency.value = freq;
+
+  gain.gain.setValueAtTime(0, ctx.currentTime);
+  gain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.01);
+  gain.gain.linearRampToValueAtTime(0, ctx.currentTime + STEP_TIME);
+
+  osc.connect(gain).connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + STEP_TIME);
+}
+
+// ===== SEQUENCER =====
+function tick() {
+  pixels.forEach(p => p.classList.remove("active"));
+
+  if (playIndex >= timeline.length) playIndex = 0;
+
+  const t = timeline[playIndex];
+  if (t?.type === "note") {
+    playNote(t.y, t.freq);
+    const idx = t.y * STEPS + t.x;
+    pixels[idx].classList.add("active");
+  }
+
+  playIndex++;
+}
+
+// ===== CONTROLES =====
+document.getElementById("play").onclick = () => {
+  if (playing || !timeline.length) return;
+  playing = true;
+  playIndex = 0;
+  timer = setInterval(tick, STEP_TIME * 1000);
+};
+
+document.getElementById("stop").onclick = () => {
+  playing = false;
+  clearInterval(timer);
+};
+
+// ===== JSON =====
+document.getElementById("export").onclick = () => {
+  json.value = JSON.stringify({ bpm: BPM, timeline }, null, 2);
+};
+
+document.getElementById("import").onclick = () => {
+  try {
+    const data = JSON.parse(json.value);
+    timeline = data.timeline || [];
+    playIndex = 0;
+    refreshGrid();
+  } catch {
+    alert("JSON inválido");
+  }
+};
+
+function bufferToWav(buffer) {
+  const numOfChan = buffer.numberOfChannels;
+  const length = buffer.length * numOfChan * 2 + 44;
+  const bufferArray = new ArrayBuffer(length);
+  const view = new DataView(bufferArray);
+
+  let offset = 0;
+
+  function writeString(str) {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset++, str.charCodeAt(i));
+    }
+  }
+
+  writeString("RIFF");
+  view.setUint32(offset, length - 8, true); offset += 4;
+  writeString("WAVE");
+
+  writeString("fmt ");
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, numOfChan, true); offset += 2;
+  view.setUint32(offset, buffer.sampleRate, true); offset += 4;
+  view.setUint32(offset, buffer.sampleRate * 2 * numOfChan, true); offset += 4;
+  view.setUint16(offset, numOfChan * 2, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+
+  writeString("data");
+  view.setUint32(offset, buffer.length * numOfChan * 2, true); offset += 4;
+
+  const channels = [];
+  for (let i = 0; i < numOfChan; i++) {
+    channels.push(buffer.getChannelData(i));
+  }
+
+  let sample = 0;
+  while (offset < length) {
+    for (let i = 0; i < numOfChan; i++) {
+      sample = Math.max(-1, Math.min(1, channels[i][(offset - 44) / 2 / numOfChan]));
+      view.setInt16(offset, sample * 32767, true);
+      offset += 2;
+    }
+  }
+
+  return new Blob([bufferArray], { type: "audio/wav" });
+}
+
+async function exportWav() {
+
+  if (!timeline.length) return;
+
+  const totalTime = timeline.length * STEP_TIME;
+
+  const offline = new OfflineAudioContext(1, 44100 * totalTime, 44100);
+
+  timeline.forEach((t, i) => {
+    if (t?.type !== "note") return;
+
+    const time = i * STEP_TIME;
+
+    const osc = offline.createOscillator();
+    const gain = offline.createGain();
+
+    osc.type = waveforms[t.y];
+    osc.frequency.value = t.freq;
+
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(0.15, time + 0.01);
+    gain.gain.linearRampToValueAtTime(0, time + STEP_TIME);
+
+    osc.connect(gain).connect(offline.destination);
+    osc.start(time);
+    osc.stop(time + STEP_TIME);
+  });
+
+  const rendered = await offline.startRendering();
+  const wavBlob = bufferToWav(rendered);
+
+  const url = URL.createObjectURL(wavBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  const ts = Math.floor(Date.now() / 1000);
+  a.download = `pixelbit_${ts}.wav`;
+  a.click();
+}
+
+document.getElementById("exportWav").onclick = exportWav;
+
+function freqToMidi(freq) {
+  return Math.round(69 + 12 * Math.log2(freq / 440));
+}
+  
+function writeVarLen(value) {
+  let buffer = value & 0x7F;
+  let bytes = [];
+
+  while ((value >>= 7)) {
+    buffer <<= 8;
+    buffer |= ((value & 0x7F) | 0x80);
+  }
+
+  while (true) {
+    bytes.push(buffer & 0xFF);
+    if (buffer & 0x80) buffer >>= 8;
+    else break;
+  }
+
+  return bytes;
+}
+
+function exportMidi() {
+
+  if (!timeline.length) return;
+
+  const ticksPerBeat = 480;
+  const microsecondsPerBeat = 60000000 / BPM;
+  const stepTicks = ticksPerBeat / 2;
+
+  let track = [];
+
+  // tempo
+  track.push(0x00, 0xFF, 0x51, 0x03,
+    (microsecondsPerBeat >> 16) & 0xFF,
+    (microsecondsPerBeat >> 8) & 0xFF,
+    microsecondsPerBeat & 0xFF
+  );
+
+  timeline.forEach((t, i) => {
+    if (t?.type !== "note") return;
+
+    const midiNote = freqToMidi(t.freq);
+    const delta = writeVarLen(i === 0 ? 0 : stepTicks);
+
+    track.push(...delta, 0x90, midiNote, 100); // note on
+    track.push(...writeVarLen(stepTicks), 0x80, midiNote, 0); // note off
+  });
+
+  track.push(0x00, 0xFF, 0x2F, 0x00); // end track
+
+  const trackLength = track.length;
+
+  const header = [
+    ...[0x4D,0x54,0x68,0x64], // MThd
+    0x00,0x00,0x00,0x06,
+    0x00,0x00,
+    0x00,0x01,
+    (ticksPerBeat >> 8) & 0xFF,
+    ticksPerBeat & 0xFF
+  ];
+
+  const trackHeader = [
+    ...[0x4D,0x54,0x72,0x6B],
+    (trackLength >> 24) & 0xFF,
+    (trackLength >> 16) & 0xFF,
+    (trackLength >> 8) & 0xFF,
+    trackLength & 0xFF
+  ];
+
+  const midiData = new Uint8Array([...header, ...trackHeader, ...track]);
+
+  const blob = new Blob([midiData], { type: "audio/midi" });
+
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  const ts = Math.floor(Date.now() / 1000);
+  a.download = `pixelbit_${ts}.mid`;
+  a.click();
+}
+
+document.getElementById("exportMidi").onclick = exportMidi;
+</script>
+
+</body>
+</html>
